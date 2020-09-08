@@ -247,6 +247,34 @@ cudf.io.orc.read_orc
 """
 doc_read_orc_metadata = docfmt_partial(docstring=_docstring_read_orc_metadata)
 
+
+_docstring_read_orc_statistics = """
+Read an ORC file's file-level and stripe-level statistics
+
+Parameters
+----------
+filepath_or_buffer : str, path object, bytes, or file-like object
+    Either a path to a file (a `str`, `pathlib.Path`, or
+    `py._path.local.LocalPath`), URL (including http, ftp, and S3 locations),
+    Python bytes of raw binary data, or any object with a `read()` method
+    (such as builtin `open()` file handler function or `BytesIO`).
+columns : list, default None
+    If not None, statistics for only these columns will be read from the file.
+
+
+Returns
+-------
+Statistics for each column of given file
+Statistics for each column for each stripe of given file
+
+See Also
+--------
+cudf.io.orc.read_orc
+"""
+doc_read_orc_statistics = docfmt_partial(
+    docstring=_docstring_read_orc_statistics
+)
+
 _docstring_read_orc = """
 Load an ORC dataset into a DataFrame
 
@@ -261,6 +289,20 @@ engine : {{ 'cudf', 'pyarrow' }}, default 'cudf'
     Parser engine to use.
 columns : list, default None
     If not None, only these columns will be read from the file.
+filters : list of tuple, list of lists of tuples default None
+    If not None, specifies a filter predicate used to filter out row groups
+    using statistics stored for each row group as Parquet metadata. Row groups
+    that do not match the given filter predicate are not read. The
+    predicate is expressed in disjunctive normal form (DNF) like
+    `[[('x', '=', 0), ...], ...]`. DNF allows arbitrary boolean logical
+    combinations of single column predicates. The innermost tuples each
+    describe a single column predicate. The list of inner predicates is
+    interpreted as a conjunction (AND), forming a more selective and
+    multiple column predicate. Finally, the outermost list combines
+    these filters as a disjunction (OR). Predicates may also be passed
+    as a list of tuples. This form is interpreted as a single conjunction.
+    To express OR in predicates, one must use the (preferred) notation of
+    list of lists of tuples.
 stripes: list, default None
     If not None, only these stripe will be read from the file. Stripes are
     concatenated with index ignored.
