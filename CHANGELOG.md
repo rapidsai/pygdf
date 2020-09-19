@@ -5,12 +5,15 @@
 - PR #5779 Add DataFrame.pivot() and DataFrame.unstack()
 - PR #5975 Add strings `filter_characters` API
 - PR #5843 Add `filters` parameter to Python `read_parquet` function for filtering row groups
+- PR #6116 Add `filters` parameter to Python `read_orc` function or filtering
 - PR #5974 Use libcudf instead of cupy for `arange` or column creation from a scalar.
 - PR #6076 Add durations type support for csv writer, reader
 - PR #5874 Add `COLLECT` groupby aggregation
 - PR #6119 Add support for `dayofweek` property in `DateTimeIndex` and `DatetimeProperties`
 - PR #6171 Java and Jni support for Struct columns
 - PR #6125 Add support for `Series.mode` and `DataFrame.mode`
+- PR #6142 Add Python `read_orc_statistics` function for reading file- and stripe-level statistics
+- PR #6177 Add support for join predicates in `filters` argument to `read_parquet`/`read_orc`
 
 ## Improvements
 

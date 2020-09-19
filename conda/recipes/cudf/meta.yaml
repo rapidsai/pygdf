@@ -20,6 +20,7 @@ build:
 
 requirements:
   build:
+    - protobuf
     - python
     - cython >=0.29,<0.30
     - setuptools
@@ -30,6 +31,7 @@ requirements:
     - rmm {{ minor_version }}.*
     - cudatoolkit {{ cuda_version }}.*
   run:
+    - protobuf
     - python
     - pandas >=1.0,<1.2.0dev0
     - cupy >=6.6.0,<8.0.0a0,!=7.1.0
