@@ -13,13 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #=============================================================================
-cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+
+# CMP0104 is a CMake policy that was added in CMake 3.18 that automatically sets the CUDA_ARCHITECTURES 
+# property of all targets to CMAKE_CUDA_ARCHITECTURES which if not set by the user, defaults to the 
+# oldest supported architecture of nvcc (Maxwell, 52 for CUDA 11.0).
+# By setting the policy to OLD it reverts to the pre CMake 3.18 behavior where CUDA_ARCHITECTURES 
+# is not implicitly set, so we can continue to use the nvcc compiler flags as we're currently doing. 
+cmake_policy(SET CMP0104 OLD)
 
 project(CUDA_DATAFRAME VERSION 0.17.0 LANGUAGES C CXX CUDA)
 
 if(NOT CMAKE_CUDA_COMPILER)
   message(SEND_ERROR "CMake cannot locate a CUDA compiler")
 endif(NOT CMAKE_CUDA_COMPILER)
+
+include(cmake/CPM.cmake)
 
 ###################################################################################################
 # - build type ------------------------------------------------------------------------------------
@@ -789,10 +798,23 @@ message(STATUS "RMM_LOGGING_LEVEL = '${RMM_LOGGING_LEVEL}'.")
 target_compile_definitions(cudf PUBLIC SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_${RMM_LOGGING_LEVEL})
 
 ###################################################################################################
+# - nvtx ------------------------------------------------------------------------------------------
+CPMAddPackage(
+    NAME NVTX
+    GITHUB_REPOSITORY jrhemstad/NVTX # Use NVIDIA/NVTX once cmake overhaul is merged
+    GIT_TAG cmake-overhaul
+    SOURCE_SUBDIR cpp
+    GIT_SHALLOW TRUE
+    OPTIONS
+       "BUILD_TESTS Off" 
+       "BUILD_BENCHMARKS Off"
+)
+
+###################################################################################################
 # - link libraries --------------------------------------------------------------------------------
 
 # link targets for cuDF
-target_link_libraries(cudf arrow arrow_cuda nvrtc ${CUDART_LIBRARY} cuda ${ZLIB_LIBRARIES} ${Boost_LIBRARIES})
+target_link_libraries(cudf arrow arrow_cuda nvrtc ${CUDART_LIBRARY} cuda ${ZLIB_LIBRARIES} ${Boost_LIBRARIES} nvtx3-cpp)
 
 ###################################################################################################
 # - install targets -------------------------------------------------------------------------------
