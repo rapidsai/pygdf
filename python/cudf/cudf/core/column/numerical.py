@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from numbers import Number
+from decimal import Decimal
 from typing import Any, Callable, Sequence, Tuple, Union, cast
 
 import numpy as np
@@ -92,16 +93,7 @@ class NumericalColumn(ColumnBase):
     def binary_operator(
         self, binop: str, rhs: BinaryOperand, reflect: bool = False,
     ) -> ColumnBase:
-        int_dtypes = [
-            np.dtype("int8"),
-            np.dtype("int16"),
-            np.dtype("int32"),
-            np.dtype("int64"),
-            np.dtype("uint8"),
-            np.dtype("uint16"),
-            np.dtype("uint32"),
-            np.dtype("uint64"),
-        ]
+
         if rhs is None:
             out_dtype = self.dtype
         else:
@@ -119,14 +111,23 @@ class NumericalColumn(ColumnBase):
                 msg = "{!r} operator not supported between {} and {}"
                 raise TypeError(msg.format(binop, type(self), type(rhs)))
             if isinstance(rhs, cudf.core.column.DecimalColumn):
-                lhs = self.as_decimal_column(
-                    Decimal64Dtype(Decimal64Dtype.MAX_PRECISION, 0)
-                )
+                # For arithmetic ops between decimals and numeric non decimals,
+                # an integral column will be cast to decimal, whereas a float
+                # column will cause the decimal operand to cast to float
+                if self.dtype.kind in 'ui':
+                    lhs = self.as_decimal_column(self._decimal_dtype())
+                elif self.dtype.kind == 'f':
+                    lhs = self
+                    rhs = rhs.astype(self.dtype)
+                else:
+                    lhs = self.as_decimal_column(
+                        Decimal64Dtype(Decimal64Dtype.MAX_PRECISION, 0)
+                    )
                 return lhs.binary_operator(binop, rhs)
             out_dtype = np.result_type(self.dtype, rhs.dtype)
             if binop in ["mod", "floordiv"]:
                 tmp = self if reflect else rhs
-                if (tmp.dtype in int_dtypes) and (
+                if (tmp.dtype.kind in 'ui') and (
                     (np.isscalar(tmp) and (0 == tmp))
                     or ((isinstance(tmp, NumericalColumn)) and (0.0 in tmp))
                 ):
@@ -219,6 +220,36 @@ class NumericalColumn(ColumnBase):
                 size=self.size,
             ),
         )
+
+    def _decimal_dtype(self):        
+        """
+        Derive a Decimal64Dtype corresponding to an integral 
+        dtype column. Dtypes are derived using the following
+        rules, which are based off of the maximum sized ints
+        that can be contained within that dtype. As such, we
+        do not allow for the uint64 and int64 cases, because
+        the resulting type would require more than 18 digits
+        of precision:
+
+        uint8  -> Decimal64Dtype(3, 1)  ✓
+        uint16 -> Decimal64Dtype(5, 1)  ✓
+        uint32 -> Decimal64Dtype(10, 1) ✓
+        uint64 -> Decimal64Dtype(20, 1) x
+        int8   -> Decimal64Dtype(3, 1)  ✓
+        int16  -> Decimal64Dtype(5, 1)  ✓
+        int32  -> Decimal64Dtype(10, 1) ✓
+        int64  -> Decimal64Dtype(19, 1) x
+        """
+        if self.dtype in {np.dtype("int64"), np.dtype("uint64")}:
+            raise TypeError(
+                f"Can not implicitly cast integer column of "
+                f"dtype {self.dtype} to Decimal64Dtype, as "
+                f"integers could contain more than 18 digits"
+            )
+        return cudf.Decimal64Dtype._from_decimal(
+            Decimal(np.iinfo(self.dtype).max)
+        )
+
 
     def as_decimal_column(
         self, dtype: Dtype, **kwargs

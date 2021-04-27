@@ -69,6 +69,13 @@ class DecimalColumn(ColumnBase):
         )
 
     def binary_operator(self, op, other, reflect=False):
+        if isinstance(other, cudf.core.column.NumericalColumn):
+            if other.dtype.kind in 'ui':
+                other = other.as_decimal_column(other._decimal_dtype())
+            elif other.dtype.kind == 'f':
+                return self.as_numerical_column(other.dtype).binary_operator(
+                    op, other, reflect=reflect
+                )
         if reflect:
             self, other = other, self
 
