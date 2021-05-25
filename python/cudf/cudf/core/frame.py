@@ -2197,7 +2197,7 @@ class Frame(libcudf.table.Table):
                 to_replace=to_replace,
                 value=replacement,
                 columns_dtype_map={
-                    col: copy_data._data[col].dtype for col in copy_data._data
+                    col: copy_data[col].dtype for col in copy_data
                 },
             )
 
@@ -3384,7 +3384,13 @@ class SingleColumnFrame(Frame):
 
     @_column.setter
     def _column(self, value):
-        self._data[self.name] = value
+        from cudf.internals.arrays import asarray
+
+        self._new_data[0] = asarray(value)
+
+    @property
+    def _array(self):
+        return self._new_data.arrays[0]
 
     @property
     def values(self):

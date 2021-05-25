@@ -5,6 +5,7 @@ import itertools
 import numpy as np
 
 from cudf.core.column_accessor import ColumnAccessor
+from cudf.internals.arrays import ArrayAccessor, asarray
 
 from cython.operator cimport dereference
 from libc.stdint cimport uintptr_t
@@ -43,6 +44,16 @@ cdef class Table:
             data = {}
         self._data = ColumnAccessor(data)
         self._index = index
+
+    @classmethod
+    def _from_arrays(cls, arrays, index=None):
+        # TODO: this should be made more efficient once
+        # ColumnAccessor goes away
+        return cls(arrays.to_column_accessor(), index=index)
+
+    @property
+    def _new_data(self) -> ArrayAccessor:
+        return self._data._data
 
     @property
     def _num_columns(self):
@@ -103,28 +114,25 @@ cdef class Table:
 
         index = None
         if index_names is not None:
-            index_data = ColumnAccessor._create_unsafe(
-                {
-                    name: Column.from_unique_ptr(
-                        move(dereference(it + i))
-                    )
-                    for i, name in enumerate(index_names)
-                }
-            )
-            index = Table(data=index_data)
+            index_arrays = [
+                asarray(Column.from_unique_ptr(
+                    move(dereference(it + i))
+                ))
+                for i, _ in enumerate(index_names)
+            ]
+            index_data = ArrayAccessor(names=index_names, data=index_arrays)
+            index = Table._from_arrays(index_data)
 
         # Construct the data dict
         cdef int n_index_columns = len(index_names) if index_names else 0
-        data = ColumnAccessor._create_unsafe(
-            {
-                name: Column.from_unique_ptr(
-                    move(dereference(it + i + n_index_columns))
-                )
-                for i, name in enumerate(column_names)
-            }
-        )
-
-        return Table(data=data, index=index)
+        arrays = [
+            asarray(Column.from_unique_ptr(
+                move(dereference(it + i + n_index_columns))
+            ))
+            for i, _ in enumerate(column_names)
+        ]
+        data = ArrayAccessor(names=column_names, data=arrays)
+        return Table._from_arrays(data, index=index)
 
     @staticmethod
     cdef Table from_table_view(
@@ -185,12 +193,12 @@ cdef class Table:
         """
         if self._index is None:
             return make_table_view(
-                self._data.columns
+                [array._column for array in self._new_data.arrays]
             )
         return make_table_view(
             itertools.chain(
-                self._index._data.columns,
-                self._data.columns,
+                [array._column for array in self._index._new_data.arrays],
+                [array._column for array in self._new_data.arrays]
             )
         )
 
