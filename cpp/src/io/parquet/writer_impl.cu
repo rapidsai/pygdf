@@ -37,6 +37,8 @@
 #include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 
+#include <nvcomp/snappy.h>
+
 #include <algorithm>
 #include <cstring>
 #include <numeric>
@@ -758,7 +760,7 @@ void writer::impl::build_chunk_dictionaries(
 
     gpu::BuildChunkDictionaries(chunks.device_view().flat_view(), dict_scratch.data(), stream);
   }
-  gpu::InitEncoderPages(chunks, {}, col_desc, num_columns, nullptr, nullptr, stream);
+  gpu::InitEncoderPages(chunks, {}, col_desc, num_columns, nullptr, nullptr, 0, stream);
   chunks.device_to_host(stream, true);
 }
 
@@ -767,6 +769,7 @@ void writer::impl::init_encoder_pages(hostdevice_2dvector<gpu::EncColumnChunk> &
                                       device_span<gpu::EncPage> pages,
                                       statistics_chunk *page_stats,
                                       statistics_chunk *frag_stats,
+                                      size_t max_page_comp_data_size,
                                       uint32_t num_columns,
                                       uint32_t num_pages,
                                       uint32_t num_stats_bfr)
@@ -779,6 +782,7 @@ void writer::impl::init_encoder_pages(hostdevice_2dvector<gpu::EncColumnChunk> &
                    num_columns,
                    (num_stats_bfr) ? page_stats_mrg.data() : nullptr,
                    (num_stats_bfr > num_pages) ? page_stats_mrg.data() + num_pages : nullptr,
+                   max_page_comp_data_size,
                    stream);
   if (num_stats_bfr > 0) {
     detail::merge_group_statistics<detail::io_file_format::PARQUET>(
@@ -795,8 +799,78 @@ void writer::impl::init_encoder_pages(hostdevice_2dvector<gpu::EncColumnChunk> &
   stream.synchronize();
 }
 
+void snappy_compress(device_span<gpu_inflate_input_s> comp_in,
+                     device_span<gpu_inflate_status_s> comp_stat,
+                     size_t max_page_uncomp_data_size,
+                     rmm::cuda_stream_view stream)
+{
+  size_t num_comp_pages = comp_in.size();
+  do {
+    size_t temp_size;
+    nvcompError_t nvcomp_error =
+      nvcompBatchedSnappyCompressGetTempSize(num_comp_pages, max_page_uncomp_data_size, &temp_size);
+    if (nvcomp_error != nvcompError_t::nvcompSuccess) { break; }
+
+    // Not needed now but nvcomp API makes no promises about future
+    rmm::device_buffer scratch(temp_size, stream);
+    // Analogous to comp_in.srcDevice
+    rmm::device_uvector<void const *> uncompressed_data_ptrs(num_comp_pages, stream);
+    // Analogous to comp_in.srcSize
+    rmm::device_uvector<size_t> uncompressed_data_sizes(num_comp_pages, stream);
+    // Analogous to comp_in.dstDevice
+    rmm::device_uvector<void *> compressed_data_ptrs(num_comp_pages, stream);
+    // Analogous to comp_stat.bytes_written
+    rmm::device_uvector<size_t> compressed_bytes_written(num_comp_pages, stream);
+    // nvcomp does not currently use comp_in.dstSize. Cannot assume that the output will fit in
+    // the space allocated unless one uses the API nvcompBatchedSnappyCompressGetOutputSize()
+
+    // Prepare the vectors
+    auto comp_it = thrust::make_zip_iterator(uncompressed_data_ptrs.begin(),
+                                             uncompressed_data_sizes.begin(),
+                                             compressed_data_ptrs.begin());
+    thrust::transform(rmm::exec_policy(stream),
+                      comp_in.begin(),
+                      comp_in.end(),
+                      comp_it,
+                      [] __device__(gpu_inflate_input_s in) {
+                        return thrust::make_tuple(in.srcDevice, in.srcSize, in.dstDevice);
+                      });
+    nvcomp_error = nvcompBatchedSnappyCompressAsync(uncompressed_data_ptrs.data(),
+                                                    uncompressed_data_sizes.data(),
+                                                    num_comp_pages,
+                                                    scratch.data(),  // Not needed rn but future
+                                                    scratch.size(),
+                                                    compressed_data_ptrs.data(),
+                                                    compressed_bytes_written.data(),
+                                                    stream.value());
+
+    if (nvcomp_error != nvcompError_t::nvcompSuccess) { break; }
+
+    // nvcomp also doesn't use comp_out.status . It guarantees that given enough output space,
+    // compression will succeed.
+    // The other `comp_out` field is `reserved` which is for internal cuIO debugging and can be 0.
+    thrust::transform(rmm::exec_policy(stream),
+                      compressed_bytes_written.begin(),
+                      compressed_bytes_written.end(),
+                      comp_stat.begin(),
+                      [] __device__(size_t size) {
+                        gpu_inflate_status_s status{};
+                        status.bytes_written = size;
+                        return status;
+                      });
+    return;
+  } while (0);
+
+  // If we reach this then there was an error in compressing so set an error status for each page
+  thrust::for_each(rmm::exec_policy(stream),
+                   comp_stat.begin(),
+                   comp_stat.end(),
+                   [] __device__(gpu_inflate_status_s & stat) { stat.status = 1; });
+}
+
 void writer::impl::encode_pages(hostdevice_2dvector<gpu::EncColumnChunk> &chunks,
                                 device_span<gpu::EncPage> pages,
+                                size_t max_page_uncomp_data_size,
                                 uint32_t pages_in_batch,
                                 uint32_t first_page_in_batch,
                                 uint32_t rowgroups_in_batch,
@@ -823,7 +897,7 @@ void writer::impl::encode_pages(hostdevice_2dvector<gpu::EncColumnChunk> &chunks
   gpu::EncodePages(batch_pages, comp_in, comp_stat, stream);
   switch (compression_) {
     case parquet::Compression::SNAPPY:
-      CUDA_TRY(gpu_snap(comp_in.data(), comp_stat.data(), pages_in_batch, stream));
+      snappy_compress(comp_in, comp_stat, max_page_uncomp_data_size, stream);
       break;
     default: break;
   }
@@ -1095,16 +1169,36 @@ void writer::impl::write(table_view const &table)
     build_chunk_dictionaries(chunks, col_desc, num_columns, num_dictionaries);
   }
 
+  // Get the maximum page size across all chunks
+  size_type max_page_uncomp_data_size =
+    std::accumulate(chunks.host_view().flat_view().begin(),
+                    chunks.host_view().flat_view().end(),
+                    0,
+                    [](uint32_t max_page_size, gpu::EncColumnChunk const &chunk) {
+                      return std::max(max_page_size, chunk.max_page_data_size);
+                    });
+
+  size_t max_page_comp_data_size = 0;
+  if (compression_ != parquet::Compression::UNCOMPRESSED) {
+    CUDF_EXPECTS(
+      nvcompError_t::nvcompSuccess == nvcompBatchedSnappyCompressGetOutputSize(
+                                        max_page_uncomp_data_size, &max_page_comp_data_size),
+      "Error in getting compressed size from nvcomp");
+  }
+
   // Initialize batches of rowgroups to encode (mainly to limit peak memory usage)
   std::vector<uint32_t> batch_list;
   uint32_t num_pages          = 0;
   size_t max_bytes_in_batch   = 1024 * 1024 * 1024;  // 1GB - TBD: Tune this
   size_t max_uncomp_bfr_size  = 0;
+  size_t max_comp_bfr_size    = 0;
   size_t max_chunk_bfr_size   = 0;
   uint32_t max_pages_in_batch = 0;
   size_t bytes_in_batch       = 0;
+  size_t comp_bytes_in_batch  = 0;
   for (uint32_t r = 0, groups_in_batch = 0, pages_in_batch = 0; r <= num_rowgroups; r++) {
-    size_t rowgroup_size = 0;
+    size_t rowgroup_size      = 0;
+    size_t comp_rowgroup_size = 0;
     if (r < num_rowgroups) {
       for (int i = 0; i < num_columns; i++) {
         gpu::EncColumnChunk *ck = &chunks[r][i];
@@ -1112,6 +1206,8 @@ void writer::impl::write(table_view const &table)
         num_pages += ck->num_pages;
         pages_in_batch += ck->num_pages;
         rowgroup_size += ck->bfr_size;
+        ck->compressed_size = ck->page_headers_size + max_page_comp_data_size * ck->num_pages;
+        comp_rowgroup_size += ck->compressed_size;
         max_chunk_bfr_size =
           std::max(max_chunk_bfr_size, (size_t)std::max(ck->bfr_size, ck->compressed_size));
       }
@@ -1120,23 +1216,25 @@ void writer::impl::write(table_view const &table)
     if ((r == num_rowgroups) ||
         (groups_in_batch != 0 && bytes_in_batch + rowgroup_size > max_bytes_in_batch)) {
       max_uncomp_bfr_size = std::max(max_uncomp_bfr_size, bytes_in_batch);
+      max_comp_bfr_size   = std::max(max_comp_bfr_size, comp_bytes_in_batch);
       max_pages_in_batch  = std::max(max_pages_in_batch, pages_in_batch);
       if (groups_in_batch != 0) {
         batch_list.push_back(groups_in_batch);
         groups_in_batch = 0;
       }
-      bytes_in_batch = 0;
-      pages_in_batch = 0;
+      bytes_in_batch      = 0;
+      comp_bytes_in_batch = 0;
+      pages_in_batch      = 0;
     }
     bytes_in_batch += rowgroup_size;
+    comp_bytes_in_batch += comp_rowgroup_size;
     groups_in_batch++;
   }
 
+  // Clear compressed buffer size if compression has been turned off
+  if (compression_ == parquet::Compression::UNCOMPRESSED) { max_comp_bfr_size = 0; }
+
   // Initialize data pointers in batch
-  size_t max_comp_bfr_size =
-    (compression_ != parquet::Compression::UNCOMPRESSED)
-      ? gpu::GetMaxCompressedBfrSize(max_uncomp_bfr_size, max_pages_in_batch)
-      : 0;
   uint32_t num_stats_bfr =
     (stats_granularity_ != statistics_freq::STATISTICS_NONE) ? num_pages + num_chunks : 0;
   rmm::device_buffer uncomp_bfr(max_uncomp_bfr_size, stream);
@@ -1165,6 +1263,7 @@ void writer::impl::write(table_view const &table)
                        {pages.data(), pages.size()},
                        (num_stats_bfr) ? page_stats.data() : nullptr,
                        (num_stats_bfr) ? frag_stats.data() : nullptr,
+                       max_page_comp_data_size,
                        num_columns,
                        num_pages,
                        num_stats_bfr);
@@ -1185,6 +1284,7 @@ void writer::impl::write(table_view const &table)
     encode_pages(
       chunks,
       {pages.data(), pages.size()},
+      max_page_uncomp_data_size,
       pages_in_batch,
       first_page_in_batch,
       batch_list[b],
