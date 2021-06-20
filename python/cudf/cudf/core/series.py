@@ -4930,17 +4930,26 @@ class Series(SingleColumnFrame, Serializable):
         >>> import cudf
         >>> ser1 = cudf.Series([0.9, 0.13, 0.62])
         >>> ser2 = cudf.Series([0.12, 0.26, 0.51])
-        >>> ser1.corr(ser2)
+        >>> ser1.corr(ser2, method="pearson")
         -0.20454263717316112
+        >>> ser1.corr(ser2, method="spearman")
+        -0.5
         """
-
-        assert method in ("pearson",) and min_periods in (None,)
 
         if self.empty or other.empty:
             return cudf.utils.dtypes._get_nan_for_dtype(self.dtype)
 
-        lhs = self.nans_to_nulls().dropna()
-        rhs = other.nans_to_nulls().dropna()
+        if method == "pearson":
+            lhs = self.nans_to_nulls().dropna()
+            rhs = other.nans_to_nulls().dropna()
+
+        elif method == "spearman":
+            lhs = self.nans_to_nulls().dropna().rank()
+            rhs = other.nans_to_nulls().dropna().rank()
+
+        else:
+            raise ValueError("method must be either 'pearson', 'spearman'")
+
         lhs, rhs = _align_indices([lhs, rhs], how="inner")
 
         return lhs._column.corr(rhs._column)

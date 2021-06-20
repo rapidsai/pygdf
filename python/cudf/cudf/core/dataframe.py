@@ -7475,12 +7475,32 @@ class DataFrame(Frame, Serializable, GetAttrGetItemMixin):
         df.columns = self.columns
         return df
 
-    def corr(self):
+    def corr(self, method="pearson"):
         """Compute the correlation matrix of a DataFrame.
+
+        Parameters
+        ----------
+        method : str, Default 'pearson'
+            The correlation method to use, one of 'pearson' or 'spearman'.
+
+        Returns
+        -------
+        DataFrame
+            The requested correlation matrix.
         """
-        corr = cupy.corrcoef(self.values, rowvar=False)
-        df = DataFrame(cupy.asfortranarray(corr)).set_index(self.columns)
-        df.columns = self.columns
+        if method == "pearson":
+            corr = cupy.corrcoef(self.values, rowvar=False)
+            df = DataFrame(cupy.asfortranarray(corr)).set_index(self.columns)
+            df.columns = self.columns
+
+        elif method == "spearman":
+            corr = cupy.corrcoef(self.rank().values, rowvar=False)
+            df = DataFrame(cupy.asfortranarray(corr)).set_index(self.columns)
+            df.columns = self.columns
+
+        else:
+            raise ValueError("method must be either 'pearson', 'spearman'")
+
         return df
 
     def to_dict(self, orient="dict", into=dict):
