@@ -45,12 +45,13 @@ def read_csv(
     na_filter=True,
     prefix=None,
     index_col=None,
+    storage_options=None,
     **kwargs,
 ):
     """{docstring}"""
 
     is_single_filepath_or_buffer = ioutils.ensure_single_filepath_or_buffer(
-        path_or_data=filepath_or_buffer, **kwargs,
+        path_or_data=filepath_or_buffer,storage_options=storage_options, **kwargs,
     )
     if not is_single_filepath_or_buffer:
         raise NotImplementedError(
@@ -61,6 +62,7 @@ def read_csv(
         path_or_data=filepath_or_buffer,
         compression=compression,
         iotypes=(BytesIO, StringIO),
+        storage_options=storage_options,
         **kwargs,
     )
 
