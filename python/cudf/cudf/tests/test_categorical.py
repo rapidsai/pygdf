@@ -60,7 +60,7 @@ def test_categorical_integer():
 
     np.testing.assert_array_equal(
         pdsr.cat.codes.values,
-        sr.cat.codes.astype(pdsr.cat.codes.dtype).fillna(-1).to_array(),
+        sr.cat.codes.to_array()
     )
 
     string = str(sr)
@@ -173,11 +173,17 @@ def test_categorical_element_indexing():
     Element indexing to a cat column must give the underlying object
     not the numerical index.
     """
-    cat = pd.Categorical(["a", "a", "b", "c", "a"], categories=["a", "b", "c"])
+    cat = pd.Categorical(["a", "a", "_", "c", "a"], categories=["a", "b", "c"])
     pdsr = pd.Series(cat)
     sr = cudf.Series(cat)
     assert_eq(pdsr, sr)
     assert_eq(pdsr.cat.codes, sr.cat.codes, check_dtype=False)
+
+    for i in range(len(sr)):
+        if pdsr.iloc[i] is not np.nan:
+            assert pdsr.iloc[i] == sr.iloc[i]
+        else:
+            assert pdsr.iloc[i] is np.nan and sr.iloc[i] is cudf.NA
 
 
 def test_categorical_masking():
@@ -340,6 +346,11 @@ def test_categorical_set_categories():
     # removing category
     expect = psr.cat.set_categories(["a", "b"])
     got = sr.cat.set_categories(["a", "b"])
+    assert_eq(expect, got)
+
+    # set different category
+    expect = psr.cat.set_categories(["a", "b", "d"])
+    got = sr.cat.set_categories(["a", "b", "d"])
     assert_eq(expect, got)
 
 
@@ -667,18 +678,7 @@ def test_add_categories(data, add):
 
     expected = pds.cat.add_categories(add)
     actual = gds.cat.add_categories(add)
-    assert_eq(
-        expected.cat.codes, actual.cat.codes.astype(expected.cat.codes.dtype)
-    )
-
-    # Need to type-cast pandas object to str due to mixed-type
-    # support in "object"
-    assert_eq(
-        expected.cat.categories.astype("str")
-        if (expected.cat.categories.dtype == "object")
-        else expected.cat.categories,
-        actual.cat.categories,
-    )
+    assert_eq(expected, actual, check_category_order=False)
 
 
 @pytest.mark.parametrize(
