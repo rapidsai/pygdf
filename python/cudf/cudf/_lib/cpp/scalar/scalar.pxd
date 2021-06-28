@@ -17,7 +17,7 @@ cdef extern from "cudf/scalar/scalar.hpp" namespace "cudf" nogil:
         scalar() except +
         scalar(scalar other) except +
         data_type type() except +
-        void set_valid(bool is_valid) except +
+        void set_valid_async(bool is_valid) except +
         bool is_valid() except +
 
     cdef cppclass numeric_scalar[T](scalar):
@@ -65,4 +65,5 @@ cdef extern from "cudf/scalar/scalar.hpp" namespace "cudf" nogil:
         # TODO: Figure out how to add an int32 overload of value()
 
     cdef cppclass list_scalar(scalar):
+        list_scalar(column_view col) except +
         column_view view() except +
