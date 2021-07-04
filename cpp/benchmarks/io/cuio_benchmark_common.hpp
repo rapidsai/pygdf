@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <cudf/io/data_sink.hpp>
 #include <cudf/io/datasource.hpp>
 #include <cudf/io/types.hpp>
 
@@ -63,6 +62,8 @@ class cuio_source_sink_pair {
    * @return The description of the data sink
    */
   cudf::io::sink_info make_sink_info();
+
+  std::unique_ptr<cudf::io::data_destination> make_destination();
 
  private:
   static temp_directory const tmpdir;

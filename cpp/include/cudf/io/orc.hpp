@@ -380,8 +380,6 @@ class orc_writer_options_builder;
  * @brief Settings to use for `write_orc()`.
  */
 class orc_writer_options {
-  // Specify the sink to use for writer output
-  sink_info _sink;
   // Specify the compression format to use
   compression_type _compression = compression_type::AUTO;
   // Enable writing column statistics
@@ -394,15 +392,11 @@ class orc_writer_options {
   friend orc_writer_options_builder;
 
   /**
-   * @brief Constructor from sink and table.
+   * @brief Constructor from table.
    *
-   * @param sink The sink used for writer output.
    * @param table Table to be written to output.
    */
-  explicit orc_writer_options(sink_info const& sink, table_view const& table)
-    : _sink(sink), _table(table)
-  {
-  }
+  explicit orc_writer_options(table_view const& table) : _table(table) {}
 
  public:
   /**
@@ -415,17 +409,11 @@ class orc_writer_options {
   /**
    * @brief Create builder to create `orc_writer_options`.
    *
-   * @param sink The sink used for writer output.
    * @param table Table to be written to output.
    *
    * @return Builder to build `orc_writer_options`.
    */
-  static orc_writer_options_builder builder(sink_info const& sink, table_view const& table);
-
-  /**
-   * @brief Returns sink info.
-   */
-  sink_info const& get_sink() const { return _sink; }
+  static orc_writer_options_builder builder(table_view const& table);
 
   /**
    * @brief Returns compression type.
@@ -490,14 +478,11 @@ class orc_writer_options_builder {
   orc_writer_options_builder() = default;
 
   /**
-   * @brief Constructor from sink and table.
+   * @brief Constructor from table.
    *
-   * @param sink The sink used for writer output.
    * @param table Table to be written to output.
    */
-  orc_writer_options_builder(sink_info const& sink, table_view const& table) : options{sink, table}
-  {
-  }
+  orc_writer_options_builder(table_view const& table) : options{table} {}
 
   /**
    * @brief Sets compression type.
@@ -567,16 +552,17 @@ class orc_writer_options_builder {
  * @code
  *  ...
  *  std::string filepath = "dataset.orc";
- *  cudf::orc_writer_options options = cudf::orc_writer_options::builder(cudf::sink_info(filepath),
- * table->view());
+ *  auto options = cudf::orc_writer_options::builder(table->view());
+ *  auto destination = cudf::io::make_file_destination(...);
  *  ...
- *  cudf::write_orc(options);
+ *  cudf::write_orc(destination.get(), options);
  * @endcode
  *
  * @param options Settings for controlling reading behavior.
  * @param mr Device memory resource to use for device memory allocation.
  */
-void write_orc(orc_writer_options const& options,
+void write_orc(data_destination* destination,
+               orc_writer_options const& options,
                rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
 
 /**
@@ -588,8 +574,6 @@ class chunked_orc_writer_options_builder;
  * @brief Settings to use for `write_orc_chunked()`.
  */
 class chunked_orc_writer_options {
-  // Specify the sink to use for writer output
-  sink_info _sink;
   // Specify the compression format to use
   compression_type _compression = compression_type::AUTO;
   // Enable writing column statistics
@@ -598,13 +582,6 @@ class chunked_orc_writer_options {
   const table_metadata_with_nullability* _metadata = nullptr;
 
   friend chunked_orc_writer_options_builder;
-
-  /**
-   * @brief Constructor from sink and table.
-   *
-   * @param sink The sink used for writer output.
-   */
-  chunked_orc_writer_options(sink_info const& sink) : _sink(sink) {}
 
  public:
   /**
@@ -617,16 +594,9 @@ class chunked_orc_writer_options {
   /**
    * @brief Create builder to create `chunked_orc_writer_options`.
    *
-   * @param sink The sink used for writer output.
-   *
    * @return Builder to build chunked_orc_writer_options.
    */
-  static chunked_orc_writer_options_builder builder(sink_info const& sink);
-
-  /**
-   * @brief Returns sink info.
-   */
-  sink_info const& get_sink() const { return _sink; }
+  static chunked_orc_writer_options_builder builder();
 
   /**
    * @brief Returns compression type.
@@ -673,17 +643,8 @@ class chunked_orc_writer_options_builder {
  public:
   /**
    * @brief Default constructor.
-   *
-   * This has been added since Cython requires a default constructor to create objects on stack.
    */
   chunked_orc_writer_options_builder() = default;
-
-  /**
-   * @brief Constructor from sink and table.
-   *
-   * @param sink The sink used for writer output.
-   */
-  explicit chunked_orc_writer_options_builder(sink_info const& sink) : options{sink} {}
 
   /**
    * @brief Sets compression type.
@@ -769,7 +730,8 @@ class orc_chunked_writer {
    * @param[in] op options used to write table
    * @param[in] mr Device memory resource to use for device memory allocation
    */
-  orc_chunked_writer(chunked_orc_writer_options const& op,
+  orc_chunked_writer(data_destination* destination,
+                     chunked_orc_writer_options const& op,
                      rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
 
   /**

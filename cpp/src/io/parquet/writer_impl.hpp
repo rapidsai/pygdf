@@ -24,7 +24,6 @@
 #include "parquet.hpp"
 #include "parquet_gpu.hpp"
 
-#include <cudf/io/data_sink.hpp>
 #include <io/utilities/hostdevice_vector.hpp>
 
 #include <cudf/detail/utilities/integer_utils.hpp>
@@ -73,7 +72,7 @@ class writer::impl {
    * @param stream CUDA stream used for device memory operations and kernel launches
    * @param mr Device memory resource to use for device memory allocation
    */
-  explicit impl(std::unique_ptr<data_sink> sink,
+  explicit impl(data_destination* sink,
                 parquet_writer_options const& options,
                 SingleWriteMode mode,
                 rmm::cuda_stream_view stream,
@@ -88,7 +87,7 @@ class writer::impl {
    * @param mr Device memory resource to use for device memory allocation
    * @param stream CUDA stream used for device memory operations and kernel launches
    */
-  explicit impl(std::unique_ptr<data_sink> sink,
+  explicit impl(data_destination* sink,
                 chunked_parquet_writer_options const& options,
                 SingleWriteMode mode,
                 rmm::cuda_stream_view stream,
@@ -223,7 +222,7 @@ class writer::impl {
   bool const single_write_mode = true;
 
   std::vector<uint8_t> buffer_;
-  std::unique_ptr<data_sink> out_sink_;
+  data_destination* out_sink_;
 };
 
 }  // namespace parquet

@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cudf/io/data_destination.hpp>
 #include <cudf/io/types.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
@@ -1141,8 +1142,6 @@ class csv_writer_options_builder;
  * @brief Settings to use for `write_csv()`.
  */
 class csv_writer_options {
-  // Specify the sink to use for writer output
-  sink_info _sink;
   // Set of columns to output
   table_view _table;
   // string to use for null entries
@@ -1168,8 +1167,8 @@ class csv_writer_options {
    * @param sink The sink used for writer output.
    * @param table Table to be written to output.
    */
-  explicit csv_writer_options(sink_info const& sink, table_view const& table)
-    : _sink(sink), _table(table), _rows_per_chunk(table.num_rows())
+  explicit csv_writer_options(table_view const& table)
+    : _table(table), _rows_per_chunk(table.num_rows())
   {
   }
 
@@ -1191,12 +1190,7 @@ class csv_writer_options {
    *
    * @return Builder to build csv_writer_options.
    */
-  static csv_writer_options_builder builder(sink_info const& sink, table_view const& table);
-
-  /**
-   * @brief Returns sink used for writer output.
-   */
-  sink_info const& get_sink(void) const { return _sink; }
+  static csv_writer_options_builder builder(table_view const& table);
 
   /**
    * @brief Returns table that would be written to output.
@@ -1315,13 +1309,9 @@ class csv_writer_options_builder {
   /**
    * @brief Constructor from sink and table.
    *
-   * @param sink The sink used for writer output.
    * @param table Table to be written to output.
    */
-  explicit csv_writer_options_builder(sink_info const& sink, table_view const& table)
-    : options{sink, table}
-  {
-  }
+  explicit csv_writer_options_builder(table_view const& table) : options{table} {}
 
   /**
    * @brief Sets optional associated metadata.
@@ -1449,7 +1439,8 @@ class csv_writer_options_builder {
  * @param options Settings for controlling writing behavior.
  * @param mr Device memory resource to use for device memory allocation.
  */
-void write_csv(csv_writer_options const& options,
+void write_csv(data_destination* sink,
+               csv_writer_options const& options,
                rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
 
 /** @} */  // end of group
