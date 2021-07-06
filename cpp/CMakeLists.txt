@@ -135,6 +135,8 @@ include(cmake/thirdparty/CUDF_GetArrow.cmake)
 include(cmake/thirdparty/CUDF_GetDLPack.cmake)
 # find libcu++
 include(cmake/thirdparty/CUDF_GetLibcudacxx.cmake)
+# find cuCollections
+include(cmake/thirdparty/CUDF_GetcuCollections.cmake)
 # find or install GoogleTest
 include(cmake/thirdparty/CUDF_GetGTest.cmake)
 # preprocess jitify-able kernels
@@ -249,7 +251,7 @@ add_library(cudf
     src/io/orc/writer_impl.cu
     src/io/parquet/compact_protocol_writer.cpp
     src/io/parquet/page_data.cu
-    src/io/parquet/page_dict.cu
+    src/io/parquet/chunk_dict.cu
     src/io/parquet/page_enc.cu
     src/io/parquet/page_hdr.cu
     src/io/parquet/parquet.cpp
@@ -443,6 +445,7 @@ target_compile_definitions(cudf PRIVATE "JITIFY_PRINT_LOG=0")
 target_include_directories(cudf
            PUBLIC      "$<BUILD_INTERFACE:${DLPACK_INCLUDE_DIR}>"
                        "$<BUILD_INTERFACE:${JITIFY_INCLUDE_DIR}>"
+                       "$<BUILD_INTERFACE:${CUCO_INCLUDE_DIR}>"
                        "$<BUILD_INTERFACE:${LIBCUDACXX_INCLUDE_DIR}>"
                        "$<BUILD_INTERFACE:${CUDF_SOURCE_DIR}/include>"
                        "$<BUILD_INTERFACE:${CUDF_GENERATED_INCLUDE_DIR}/include>"

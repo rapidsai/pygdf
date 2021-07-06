@@ -505,7 +505,7 @@ struct parquet_column_view {
                       rmm::cuda_stream_view stream);
 
   column_view leaf_column_view() const;
-  gpu::parquet_column_device_view get_device_view(rmm::cuda_stream_view stream);
+  gpu::parquet_column_device_view get_device_view(rmm::cuda_stream_view stream) const;
 
   column_view cudf_column_view() const { return cudf_col; }
   parquet::Type physical_type() const { return schema_node.type; }
@@ -516,26 +516,6 @@ struct parquet_column_view {
   uint8_t max_def_level() const noexcept { return _max_def_level; }
   uint8_t max_rep_level() const noexcept { return _max_rep_level; }
   bool is_list() const noexcept { return _is_list; }
-
-  // Dictionary related member functions
-  uint32_t *get_dict_data() { return (_dict_data.size()) ? _dict_data.data() : nullptr; }
-  uint32_t *get_dict_index() { return (_dict_index.size()) ? _dict_index.data() : nullptr; }
-  void use_dictionary(bool use_dict) { _dictionary_used = use_dict; }
-  void alloc_dictionary(size_t max_num_rows, rmm::cuda_stream_view stream)
-  {
-    _dict_data.resize(max_num_rows, stream);
-    _dict_index.resize(max_num_rows, stream);
-  }
-  bool check_dictionary_used(rmm::cuda_stream_view stream)
-  {
-    if (!_dictionary_used) {
-      _dict_data.resize(0, stream);
-      _dict_data.shrink_to_fit(stream);
-      _dict_index.resize(0, stream);
-      _dict_index.shrink_to_fit(stream);
-    }
-    return _dictionary_used;
-  }
 
  private:
   // Schema related members
@@ -556,11 +536,6 @@ struct parquet_column_view {
   rmm::device_uvector<uint8_t> _def_level;
   std::vector<uint8_t> _nullability;
   size_type _data_count = 0;
-
-  // Dictionary related members
-  bool _dictionary_used = false;
-  rmm::device_uvector<uint32_t> _dict_data;
-  rmm::device_uvector<uint32_t> _dict_index;
 };
 
 parquet_column_view::parquet_column_view(schema_tree_node const &schema_node,
@@ -570,9 +545,7 @@ parquet_column_view::parquet_column_view(schema_tree_node const &schema_node,
     _d_nullability(0, stream),
     _dremel_offsets(0, stream),
     _rep_level(0, stream),
-    _def_level(0, stream),
-    _dict_data(0, stream),
-    _dict_index(0, stream)
+    _def_level(0, stream)
 {
   // Construct single inheritance column_view from linked_column_view
   auto curr_col                           = schema_node.leaf_column.get();
@@ -683,20 +656,13 @@ column_view parquet_column_view::leaf_column_view() const
   return col;
 }
 
-gpu::parquet_column_device_view parquet_column_view::get_device_view(rmm::cuda_stream_view stream)
+gpu::parquet_column_device_view parquet_column_view::get_device_view(
+  rmm::cuda_stream_view stream) const
 {
   column_view col  = leaf_column_view();
   auto desc        = gpu::parquet_column_device_view{};  // Zero out all fields
   desc.stats_dtype = schema_node.stats_dtype;
   desc.ts_scale    = schema_node.ts_scale;
-
-  // TODO (dm): Enable dictionary for list and struct after refactor
-  if (physical_type() != BOOLEAN && physical_type() != UNDEFINED_TYPE &&
-      !is_nested(cudf_col.type())) {
-    alloc_dictionary(_data_count, stream);
-    desc.dict_index = get_dict_index();
-    desc.dict_data  = get_dict_data();
-  }
 
   if (is_list()) {
     desc.level_offsets = _dremel_offsets.data();
@@ -705,15 +671,9 @@ gpu::parquet_column_device_view parquet_column_view::get_device_view(rmm::cuda_s
   }
   desc.num_rows      = cudf_col.size();
   desc.physical_type = static_cast<uint8_t>(physical_type());
-  auto count_bits    = [](uint16_t number) {
-    int16_t nbits = 0;
-    while (number > 0) {
-      nbits++;
-      number >>= 1;
-    }
-    return nbits;
-  };
-  desc.level_bits  = count_bits(max_rep_level()) << 4 | count_bits(max_def_level());
+
+  desc.level_bits = CompactProtocolReader::NumRequiredBits(max_rep_level()) << 4 |
+                    CompactProtocolReader::NumRequiredBits(max_def_level());
   desc.nullability = _d_nullability.data();
   return desc;
 }
@@ -744,22 +704,99 @@ void writer::impl::gather_fragment_statistics(
   stream.synchronize();
 }
 
-void writer::impl::build_chunk_dictionaries(
-  hostdevice_2dvector<gpu::EncColumnChunk> &chunks,
-  device_span<gpu::parquet_column_device_view const> col_desc,
-  uint32_t num_columns,
-  uint32_t num_dictionaries)
+void writer::impl::init_page_sizes(hostdevice_2dvector<gpu::EncColumnChunk> &chunks,
+                                   device_span<gpu::parquet_column_device_view const> col_desc,
+                                   uint32_t num_columns)
 {
   chunks.host_to_device(stream);
-  if (num_dictionaries > 0) {
-    size_t dict_scratch_size = (size_t)num_dictionaries * gpu::kDictScratchSize;
-    auto dict_scratch        = cudf::detail::make_zeroed_device_uvector_async<uint32_t>(
-      dict_scratch_size / sizeof(uint32_t), stream);
-
-    gpu::BuildChunkDictionaries(chunks.device_view().flat_view(), dict_scratch.data(), stream);
-  }
   gpu::InitEncoderPages(chunks, {}, col_desc, num_columns, nullptr, nullptr, stream);
   chunks.device_to_host(stream, true);
+}
+
+auto build_chunk_dictionaries(hostdevice_2dvector<gpu::EncColumnChunk> &chunks,
+                              host_span<gpu::parquet_column_device_view const> col_desc,
+                              uint32_t num_rows,
+                              rmm::cuda_stream_view stream)
+{
+  // At this point, we know all chunks and their sizes. We want to allocate dictionaries for each
+  // chunk that can have dictionary
+
+  auto h_chunks = chunks.host_view().flat_view();
+
+  std::vector<rmm::device_uvector<size_type>> dict_data;
+  std::vector<rmm::device_uvector<uint16_t>> dict_index;
+
+  if (h_chunks.size() == 0) { return std::make_pair(std::move(dict_data), std::move(dict_index)); }
+
+  // Allocate slots for each chunk
+  std::vector<rmm::device_uvector<gpu::slot_type>> hash_maps_storage;
+  hash_maps_storage.reserve(h_chunks.size());
+  for (auto &chunk : h_chunks) {
+    if (col_desc[chunk.col_desc_id].physical_type == Type::BOOLEAN) {
+      chunk.use_dictionary = false;
+    } else {
+      chunk.use_dictionary = true;
+      auto &inserted_map   = hash_maps_storage.emplace_back(chunk.num_values, stream);
+      chunk.dict_map_slots = inserted_map.data();
+      chunk.dict_map_size  = inserted_map.size();
+    }
+  }
+
+  chunks.host_to_device(stream);
+
+  gpu::InitializeChunkHashMaps(chunks.device_view().flat_view(), stream);
+  gpu::PopulateChunkHashMaps(chunks, num_rows, stream);
+
+  chunks.device_to_host(stream);
+  stream.synchronize();
+
+  // Make decision about which chunks have dictionary
+  for (auto &ck : h_chunks) {
+    if (not ck.use_dictionary) { continue; }
+    std::tie(ck.use_dictionary, ck.dict_rle_bits) = [&]() {
+      // We don't use dictionary if the indices are > 16 bits
+      if (ck.num_dict_entries > MAX_DICT_SIZE) { return std::make_pair(false, 0); }
+
+      // calculate size of chunk if dictionary is used
+
+      // If we have N unique values then the idx for the last value is N - 1 and nbits is the number
+      // of bits required to encode indices into the dictionary
+      auto max_dict_index = (ck.num_dict_entries > 0) ? ck.num_dict_entries - 1 : 0;
+      auto nbits          = CompactProtocolReader::NumRequiredBits(max_dict_index);
+      CUDF_EXPECTS(nbits <= 16, "Maximum supported bits by dictionary encoder is 16");
+
+      // Only these bit sizes are allowed for RLE encoding because it's compute optimized
+      constexpr auto allowed_bitsizes = std::array<size_type, 6>{1, 2, 4, 8, 12, 16};
+
+      // ceil to (1/2/4/8/12/16)
+      auto rle_bits = *std::lower_bound(allowed_bitsizes.begin(), allowed_bitsizes.end(), nbits);
+      auto rle_byte_size = util::div_rounding_up_safe(ck.num_values * rle_bits, 8);
+
+      auto dict_enc_size = ck.uniq_data_size + rle_byte_size;
+
+      bool use_dict = (ck.plain_data_size > dict_enc_size);
+      if (not use_dict) { rle_bits = 0; }
+      return std::make_pair(use_dict, rle_bits);
+    }();
+  }
+
+  // TODO: (enh) Deallocate hash map storage for chunks that don't use dict and clear pointers.
+
+  dict_data.reserve(h_chunks.size());
+  dict_index.reserve(h_chunks.size());
+  for (auto &chunk : h_chunks) {
+    if (not chunk.use_dictionary) { continue; }
+
+    auto &inserted_dict_data  = dict_data.emplace_back(MAX_DICT_SIZE, stream);
+    auto &inserted_dict_index = dict_index.emplace_back(chunk.num_values, stream);
+    chunk.dict_data           = inserted_dict_data.data();
+    chunk.dict_index          = inserted_dict_index.data();
+  }
+  chunks.host_to_device(stream);
+  gpu::CollectMapEntries(chunks.device_view().flat_view(), stream);
+  gpu::GetDictionaryIndices(chunks.device_view(), num_rows, stream);
+
+  return std::make_pair(std::move(dict_data), std::move(dict_index));
 }
 
 void writer::impl::init_encoder_pages(hostdevice_2dvector<gpu::EncColumnChunk> &chunks,
@@ -957,10 +994,8 @@ void writer::impl::write(table_view const &table)
 
   // Initialize column description
   hostdevice_vector<gpu::parquet_column_device_view> col_desc(parquet_columns.size(), stream);
-  // This should've been `auto const&` but isn't since dictionary space is allocated when calling
-  // get_device_view(). Fix during dictionary refactor.
   std::transform(
-    parquet_columns.begin(), parquet_columns.end(), col_desc.host_ptr(), [&](auto &pcol) {
+    parquet_columns.begin(), parquet_columns.end(), col_desc.host_ptr(), [&](auto const &pcol) {
       return pcol.get_device_view(stream);
     });
 
@@ -1031,7 +1066,6 @@ void writer::impl::write(table_view const &table)
   // Initialize row groups and column chunks
   uint32_t num_chunks = num_rowgroups * num_columns;
   hostdevice_2dvector<gpu::EncColumnChunk> chunks(num_rowgroups, num_columns, stream);
-  uint32_t num_dictionaries = 0;
   for (uint32_t r = 0, global_r = global_rowgroup_base, f = 0, start_row = 0; r < num_rowgroups;
        r++, global_r++) {
     uint32_t fragments_in_chunk =
@@ -1040,11 +1074,11 @@ void writer::impl::write(table_view const &table)
     md.row_groups[global_r].columns.resize(num_columns);
     for (int i = 0; i < num_columns; i++) {
       gpu::EncColumnChunk *ck = &chunks[r][i];
-      bool dict_enable        = false;
 
-      *ck           = {};
-      ck->col_desc  = col_desc.device_ptr() + i;
-      ck->fragments = &fragments.device_view()[i][f];
+      *ck             = {};
+      ck->col_desc    = col_desc.device_ptr() + i;
+      ck->col_desc_id = i;
+      ck->fragments   = &fragments.device_view()[i][f];
       ck->stats = (frag_stats.size() != 0) ? frag_stats.data() + i * num_fragments + f : nullptr;
       ck->start_row        = start_row;
       ck->num_rows         = (uint32_t)md.row_groups[global_r].num_rows;
@@ -1054,30 +1088,12 @@ void writer::impl::write(table_view const &table)
         std::accumulate(chunk_fragments.begin(), chunk_fragments.end(), 0, [](uint32_t l, auto r) {
           return l + r.num_values;
         });
-      ck->dictionary_id = num_dictionaries;
-      if (col_desc[i].dict_data) {
-        size_t plain_size      = 0;
-        size_t dict_size       = 1;
-        uint32_t num_dict_vals = 0;
-        for (uint32_t j = 0; j < fragments_in_chunk && num_dict_vals < 65536; j++) {
-          plain_size += chunk_fragments[j].fragment_data_size;
-          dict_size += chunk_fragments[j].dict_data_size +
-                       ((num_dict_vals > 256) ? 2 : 1) * chunk_fragments[j].non_nulls;
-          num_dict_vals += chunk_fragments[j].num_dict_vals;
-        }
-        if (dict_size < plain_size) {
-          parquet_columns[i].use_dictionary(true);
-          dict_enable = true;
-          num_dictionaries++;
-        }
-      }
-      ck->has_dictionary                                     = dict_enable;
+      ck->plain_data_size = std::accumulate(
+        chunk_fragments.begin(), chunk_fragments.end(), 0, [](int sum, gpu::PageFragment frag) {
+          return sum + frag.fragment_data_size;
+        });
       md.row_groups[global_r].columns[i].meta_data.type      = parquet_columns[i].physical_type();
       md.row_groups[global_r].columns[i].meta_data.encodings = {Encoding::PLAIN, Encoding::RLE};
-      if (dict_enable) {
-        md.row_groups[global_r].columns[i].meta_data.encodings.push_back(
-          Encoding::PLAIN_DICTIONARY);
-      }
       md.row_groups[global_r].columns[i].meta_data.path_in_schema =
         parquet_columns[i].get_path_in_schema();
       md.row_groups[global_r].columns[i].meta_data.codec      = UNCOMPRESSED;
@@ -1087,13 +1103,19 @@ void writer::impl::write(table_view const &table)
     start_row += (uint32_t)md.row_groups[global_r].num_rows;
   }
 
-  // Free unused dictionaries
-  for (auto &col : parquet_columns) { col.check_dictionary_used(stream); }
+  // Yahan banayenge nayi dictionary ka ghar
+  auto dict_info_owner = build_chunk_dictionaries(chunks, col_desc, num_rows, stream);
+  for (uint32_t rg = 0, global_rg = global_rowgroup_base; rg < num_rowgroups; rg++, global_rg++) {
+    for (int col = 0; col < num_columns; col++) {
+      if (chunks.host_view()[rg][col].use_dictionary) {
+        md.row_groups[global_rg].columns[col].meta_data.encodings.push_back(
+          Encoding::PLAIN_DICTIONARY);
+      }
+    }
+  }
 
   // Build chunk dictionaries and count pages
-  if (num_chunks != 0) {
-    build_chunk_dictionaries(chunks, col_desc, num_columns, num_dictionaries);
-  }
+  if (num_chunks != 0) { init_page_sizes(chunks, col_desc, num_columns); }
 
   // Initialize batches of rowgroups to encode (mainly to limit peak memory usage)
   std::vector<uint32_t> batch_list;
@@ -1243,9 +1265,9 @@ void writer::impl::write(table_view const &table)
         }
         md.row_groups[global_r].total_byte_size += ck->compressed_size;
         md.row_groups[global_r].columns[i].meta_data.data_page_offset =
-          current_chunk_offset + ((ck->has_dictionary) ? ck->dictionary_size : 0);
+          current_chunk_offset + ((ck->use_dictionary) ? ck->dictionary_size : 0);
         md.row_groups[global_r].columns[i].meta_data.dictionary_page_offset =
-          (ck->has_dictionary) ? current_chunk_offset : 0;
+          (ck->use_dictionary) ? current_chunk_offset : 0;
         md.row_groups[global_r].columns[i].meta_data.total_uncompressed_size = ck->bfr_size;
         md.row_groups[global_r].columns[i].meta_data.total_compressed_size   = ck->compressed_size;
         current_chunk_offset += ck->compressed_size;
