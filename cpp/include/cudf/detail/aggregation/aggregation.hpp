@@ -18,6 +18,7 @@
 
 #include <cudf/aggregation.hpp>
 #include <cudf/detail/utilities/assert.cuh>
+#include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/traits.hpp>
@@ -73,6 +74,10 @@ class simple_aggregations_collector {  // Declares the interface for the simple 
                                                           class nth_element_aggregation const& agg);
   virtual std::vector<std::unique_ptr<aggregation>> visit(data_type col_type,
                                                           class row_number_aggregation const& agg);
+  virtual std::vector<std::unique_ptr<aggregation>> visit(data_type col_type,
+                                                          class rank_aggregation const& agg);
+  virtual std::vector<std::unique_ptr<aggregation>> visit(data_type col_type,
+                                                          class dense_rank_aggregation const& agg);
   virtual std::vector<std::unique_ptr<aggregation>> visit(
     data_type col_type, class collect_list_aggregation const& agg);
   virtual std::vector<std::unique_ptr<aggregation>> visit(data_type col_type,
@@ -112,6 +117,8 @@ class aggregation_finalizer {  // Declares the interface for the finalizer
   virtual void visit(class nunique_aggregation const& agg);
   virtual void visit(class nth_element_aggregation const& agg);
   virtual void visit(class row_number_aggregation const& agg);
+  virtual void visit(class rank_aggregation const& agg);
+  virtual void visit(class dense_rank_aggregation const& agg);
   virtual void visit(class collect_list_aggregation const& agg);
   virtual void visit(class collect_set_aggregation const& agg);
   virtual void visit(class lead_lag_aggregation const& agg);
@@ -574,6 +581,120 @@ class row_number_aggregation final : public rolling_aggregation {
 };
 
 /**
+ * @brief Derived class for specifying a rank aggregation
+ */
+class rank_aggregation final : public rolling_aggregation {
+ public:
+  rank_aggregation(table_view order_by) : aggregation{RANK}, _order_by{order_by} {}
+
+  table_view _order_by;
+
+  bool is_equal(aggregation const& _other) const override
+  {
+    if (!this->aggregation::is_equal(_other)) { return false; }
+    auto const& other = dynamic_cast<rank_aggregation const&>(_other);
+
+    if ((_order_by.num_rows() != other._order_by.num_rows()) ||
+        _order_by.num_columns() != other._order_by.num_columns()) {
+      return false;
+    }
+    for (int i = 0; i < _order_by.num_columns(); i++) {
+      column_view lhs = _order_by.column(i);
+      column_view rhs = other._order_by.column(i);
+      if (lhs.type() != rhs.type() || lhs.offset() != rhs.offset() ||
+          lhs.data<size_type>() != rhs.data<size_type>() ||
+          (lhs.null_mask() != rhs.null_mask() && lhs.null_count() != rhs.null_count())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  size_t do_hash() const override { return this->aggregation::do_hash() ^ hash_impl(); }
+
+  std::unique_ptr<aggregation> clone() const override
+  {
+    return std::make_unique<rank_aggregation>(*this);
+  }
+  std::vector<std::unique_ptr<aggregation>> get_simple_aggregations(
+    data_type col_type, cudf::detail::simple_aggregations_collector& collector) const override
+  {
+    return collector.visit(col_type, *this);
+  }
+  void finalize(aggregation_finalizer& finalizer) const override { finalizer.visit(*this); }
+
+ private:
+  size_t hash_impl() const
+  {
+    size_t result = std::hash<int>{}(_order_by.num_rows());
+    for_each(_order_by.begin(), _order_by.end(), [&](column_view col) {
+      result ^= std::hash<size_t>{}(static_cast<size_t>(col.type().id())) ^
+                std::hash<size_t>{}(static_cast<size_t>(col.offset())) ^
+                std::hash<size_t>{}(reinterpret_cast<size_t>(col.data<size_type>())) ^
+                std::hash<size_t>{}(reinterpret_cast<size_t>(col.null_mask()));
+    });
+    return result;
+  }
+};
+
+/**
+ * @brief Derived class for specifying a dense rank aggregation
+ */
+class dense_rank_aggregation final : public rolling_aggregation {
+ public:
+  dense_rank_aggregation(table_view order_by) : aggregation{DENSE_RANK}, _order_by{order_by} {}
+
+  table_view _order_by;
+
+  bool is_equal(aggregation const& _other) const override
+  {
+    if (!this->aggregation::is_equal(_other)) { return false; }
+    auto const& other = dynamic_cast<dense_rank_aggregation const&>(_other);
+
+    if ((_order_by.num_rows() != other._order_by.num_rows()) ||
+        _order_by.num_columns() != other._order_by.num_columns()) {
+      return false;
+    }
+    for (int i = 0; i < _order_by.num_columns(); i++) {
+      column_view lhs = _order_by.column(i);
+      column_view rhs = other._order_by.column(i);
+      if (lhs.type() != rhs.type() || lhs.offset() != rhs.offset() ||
+          lhs.data<size_type>() != rhs.data<size_type>() ||
+          (lhs.null_mask() != rhs.null_mask() && lhs.null_count() != rhs.null_count())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  size_t do_hash() const override { return this->aggregation::do_hash() ^ hash_impl(); }
+
+  std::unique_ptr<aggregation> clone() const override
+  {
+    return std::make_unique<dense_rank_aggregation>(*this);
+  }
+  std::vector<std::unique_ptr<aggregation>> get_simple_aggregations(
+    data_type col_type, cudf::detail::simple_aggregations_collector& collector) const override
+  {
+    return collector.visit(col_type, *this);
+  }
+  void finalize(aggregation_finalizer& finalizer) const override { finalizer.visit(*this); }
+
+ private:
+  size_t hash_impl() const
+  {
+    size_t result = std::hash<int>{}(_order_by.num_rows());
+    for_each(_order_by.begin(), _order_by.end(), [&](column_view col) {
+      result ^= std::hash<size_t>{}(static_cast<size_t>(col.type().id())) ^
+                std::hash<size_t>{}(static_cast<size_t>(col.offset())) ^
+                std::hash<size_t>{}(reinterpret_cast<size_t>(col.data<size_type>())) ^
+                std::hash<size_t>{}(reinterpret_cast<size_t>(col.null_mask()));
+    });
+    return result;
+  }
+};
+
+/**
  * @brief Derived aggregation class for specifying COLLECT_LIST aggregation
  */
 class collect_list_aggregation final : public rolling_aggregation {
@@ -1008,6 +1129,18 @@ struct target_type_impl<Source, aggregation::ROW_NUMBER> {
   using type = cudf::size_type;
 };
 
+// Always use size_type accumulator for RANK
+template <typename Source>
+struct target_type_impl<Source, aggregation::RANK> {
+  using type = cudf::size_type;
+};
+
+// Always use size_type accumulator for DENSE_RANK
+template <typename Source>
+struct target_type_impl<Source, aggregation::DENSE_RANK> {
+  using type = cudf::size_type;
+};
+
 // Always use list for COLLECT_LIST
 template <typename Source>
 struct target_type_impl<Source, aggregation::COLLECT_LIST> {
@@ -1136,6 +1269,10 @@ CUDA_HOST_DEVICE_CALLABLE decltype(auto) aggregation_dispatcher(aggregation::Kin
       return f.template operator()<aggregation::NTH_ELEMENT>(std::forward<Ts>(args)...);
     case aggregation::ROW_NUMBER:
       return f.template operator()<aggregation::ROW_NUMBER>(std::forward<Ts>(args)...);
+    case aggregation::RANK:
+      return f.template operator()<aggregation::RANK>(std::forward<Ts>(args)...);
+    case aggregation::DENSE_RANK:
+      return f.template operator()<aggregation::DENSE_RANK>(std::forward<Ts>(args)...);
     case aggregation::COLLECT_LIST:
       return f.template operator()<aggregation::COLLECT_LIST>(std::forward<Ts>(args)...);
     case aggregation::COLLECT_SET:

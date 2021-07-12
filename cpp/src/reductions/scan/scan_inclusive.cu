@@ -23,6 +23,7 @@
 #include <cudf/detail/null_mask.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/reduction.hpp>
+#include <cudf/table/row_operators.cuh>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
@@ -34,7 +35,7 @@ namespace cudf {
 namespace detail {
 
 // logical-and scan of the null mask of the input view
-rmm::device_buffer mask_scan(const column_view& input_view,
+rmm::device_buffer mask_scan(column_view const& input_view,
                              cudf::scan_type inclusive,
                              rmm::cuda_stream_view stream,
                              rmm::mr::device_memory_resource* mr)
@@ -155,7 +156,87 @@ struct scan_dispatcher {
   }
 };
 
+template <typename Comparator>
+void generate_rank_comparisons(mutable_column_view out,
+                               Comparator comp,
+                               rmm::cuda_stream_view stream)
+{
+  thrust::tabulate(rmm::exec_policy(stream),
+                   out.begin<size_type>(),
+                   out.end<size_type>(),
+                   [comp] __device__(size_type row_index) {
+                     return (row_index == 0 || !comp(row_index, row_index - 1)) ? row_index + 1 : 0;
+                   });
+}
+
+template <typename Comparator>
+void generate_dense_rank_comparisons(mutable_column_view out,
+                                     Comparator comp,
+                                     rmm::cuda_stream_view stream)
+{
+  thrust::tabulate(rmm::exec_policy(stream),
+                   out.begin<size_type>(),
+                   out.end<size_type>(),
+                   [comp] __device__(size_type row_index) {
+                     return row_index == 0 || !comp(row_index, row_index - 1);
+                   });
+}
+
 }  // namespace
+
+std::unique_ptr<column> inclusive_rank_scan(aggregation const& agg,
+                                            rmm::cuda_stream_view stream,
+                                            rmm::mr::device_memory_resource* mr)
+{
+  auto const& rank_agg = dynamic_cast<rank_aggregation const&>(agg);
+  auto d_order_by      = table_device_view::create(rank_agg._order_by);
+  auto ranks           = make_fixed_width_column(cudf::data_type{cudf::type_to_id<size_type>()},
+                                       rank_agg._order_by.num_rows(),
+                                       mask_state::ALL_VALID,
+                                       stream,
+                                       mr);
+  auto mutable_ranks   = ranks->mutable_view();
+  if (has_nested_nulls(rank_agg._order_by)) {
+    row_equality_comparator<true> row_comparator(*d_order_by, *d_order_by, true);
+    generate_rank_comparisons(mutable_ranks, row_comparator, stream);
+  } else {
+    row_equality_comparator<false> row_comparator(*d_order_by, *d_order_by, true);
+    generate_rank_comparisons(mutable_ranks, row_comparator, stream);
+  }
+
+  thrust::inclusive_scan(rmm::exec_policy(stream),
+                         mutable_ranks.begin<size_type>(),
+                         mutable_ranks.end<size_type>(),
+                         mutable_ranks.begin<size_type>(),
+                         DeviceMax{});
+  return ranks;
+}
+
+std::unique_ptr<column> inclusive_dense_rank_scan(aggregation const& agg,
+                                                  rmm::cuda_stream_view stream,
+                                                  rmm::mr::device_memory_resource* mr)
+{
+  auto const& dense_agg = dynamic_cast<dense_rank_aggregation const&>(agg);
+  auto d_order_by       = table_device_view::create(dense_agg._order_by);
+  auto ranks         = make_fixed_width_column(cudf::data_type{cudf::type_to_id<cudf::size_type>()},
+                                       dense_agg._order_by.num_rows(),
+                                       mask_state::ALL_VALID,
+                                       stream,
+                                       mr);
+  auto mutable_ranks = ranks->mutable_view();
+  if (has_nested_nulls(dense_agg._order_by)) {
+    row_equality_comparator<true> row_comparator(*d_order_by, *d_order_by, true);
+    generate_dense_rank_comparisons(mutable_ranks, row_comparator, stream);
+  } else {
+    row_equality_comparator<false> row_comparator(*d_order_by, *d_order_by, true);
+    generate_dense_rank_comparisons(mutable_ranks, row_comparator, stream);
+  }
+  thrust::inclusive_scan(rmm::exec_policy(stream),
+                         mutable_ranks.begin<size_type>(),
+                         mutable_ranks.end<size_type>(),
+                         mutable_ranks.begin<size_type>());
+  return ranks;
+}
 
 std::unique_ptr<column> scan_inclusive(
   const column_view& input,
@@ -166,7 +247,9 @@ std::unique_ptr<column> scan_inclusive(
 {
   auto output = scan_agg_dispatch<scan_dispatcher>(input, agg, null_handling, stream, mr);
 
-  if (null_handling == null_policy::EXCLUDE) {
+  if (agg->kind == aggregation::RANK || agg->kind == aggregation::DENSE_RANK) {
+    return output;
+  } else if (null_handling == null_policy::EXCLUDE) {
     output->set_null_mask(detail::copy_bitmask(input, stream, mr), input.null_count());
   } else if (input.nullable()) {
     output->set_null_mask(mask_scan(input, scan_type::INCLUSIVE, stream, mr),

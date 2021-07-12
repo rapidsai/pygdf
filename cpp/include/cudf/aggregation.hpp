@@ -77,6 +77,8 @@ class aggregation {
     NUNIQUE,         ///< count number of unique elements
     NTH_ELEMENT,     ///< get the nth element
     ROW_NUMBER,      ///< get row-number of current index (relative to rolling window)
+    RANK,            ///< get rank       of current index (relative to rolling window)
+    DENSE_RANK,      ///< get dense rank of current index (relative to rolling window)
     COLLECT_LIST,    ///< collect values into a list
     COLLECT_SET,     ///< collect values into a list without duplicate entries
     LEAD,            ///< window function, accesses row at specified offset following current row
@@ -254,6 +256,42 @@ template <typename Base = aggregation>
 std::unique_ptr<Base> make_row_number_aggregation();
 
 /**
+ * @brief Factory to create a RANK aggregation
+ *
+ * `RANK` returns a non-nullable column of size_type ranks, the number of rows preceding
+ * or equal to the current row plus one. As a result, ranks are not unique and gaps will
+ * appear in the ranking sequence. `RANK` aggregations ignore the input values in scan and
+ * groupby scan. Additionally, they are not compatible with exclusive scans and will return
+ * a fully valid column regardless of null_handling policy specified.
+ *
+ * order_by              = {{0, 0, 0, 1, 1, 1}, {0, 0, 1, 0, 1, 1}}
+ * ungrouped_scan_result = {1, 1, 3, 4, 5, 5}
+ *
+ * @param order_by table that the rows are sorted on, assumed to be presorted. If running a grouped
+ *        aggregation, the first columns in the table should be the partition columns in order.
+ */
+template <typename Base = aggregation>
+std::unique_ptr<Base> make_rank_aggregation(table_view order_by);
+
+/**
+ * @brief Factory to create a DENSE_RANK aggregation
+ *
+ * `DENSE_RANK` returns a non-nullable column of dense size_type ranks, the preceding unique
+ * value's rank plus one. As a result, ranks are not unique but there are no gaps in the
+ * ranking sequence (unlike RANK aggregations). `DENSE_RANK` aggregations ignore the input
+ * values in scan and groupby scan. Additionally, they are not compatible with exclusive scans
+ * and will return a fully valid column regardless of null_handling policy specified.
+ *
+ * order_by              = {{0, 0, 0, 1, 1, 1}, {0, 0, 1, 0, 1, 1}}
+ * ungrouped_scan_result = {1, 1, 2, 3, 4, 4}
+ *
+ * @param order_by table that the rows are sorted on, assumed to be presorted. If running a grouped
+ *        aggregation, the first columns in the table should be the partition columns in order.
+ */
+template <typename Base = aggregation>
+std::unique_ptr<Base> make_dense_rank_aggregation(table_view order_by);
+
+/**
  * @brief Factory to create a COLLECT_LIST aggregation
  *
  * `COLLECT_LIST` returns a list column of all included elements in the group/series.
@@ -268,7 +306,7 @@ std::unique_ptr<Base> make_collect_list_aggregation(
   null_policy null_handling = null_policy::INCLUDE);
 
 /**
- * @brief Factory to create a COLLECT_SET aggregation.
+ * @brief Factory to create a COLLECT_SET aggregation
  *
  * `COLLECT_SET` returns a lists column of all included elements in the group/series. Within each
  * list, the duplicated entries are dropped out such that each entry appears only once.
