@@ -1345,7 +1345,13 @@ def column_empty(
     dtype = pandas_dtype(dtype)
     children = ()  # type: Tuple[ColumnBase, ...]
 
-    if is_categorical_dtype(dtype):
+    if is_struct_dtype(dtype):
+        data = None
+        children = tuple(
+            column_empty(row_count, dtype.fields[f])
+            for f in dtype.fields.keys()
+        )
+    elif is_categorical_dtype(dtype):
         data = None
         children = (
             build_column(
