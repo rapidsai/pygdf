@@ -677,7 +677,7 @@ class ColumnBase(Column, Serializable):
         return indices[-1]
 
     def append(self, other: ColumnBase) -> ColumnBase:
-        return _concat_columns([self, as_column(other)])
+        return concat_columns([self, as_column(other)])
 
     def quantile(
         self,
@@ -2037,12 +2037,19 @@ def as_column(
             np_type = None
             try:
                 if dtype is not None:
+                    if is_categorical_dtype(dtype) or is_interval_dtype(dtype):
+                        raise TypeError
                     if is_list_dtype(dtype):
                         data = pa.array(arbitrary)
                         if type(data) not in (pa.ListArray, pa.NullArray):
                             raise ValueError(
                                 "Cannot create list column from given data"
                             )
+                        return as_column(data, nan_as_null=nan_as_null)
+                    elif isinstance(
+                        dtype, cudf.StructDtype
+                    ) and not isinstance(dtype, cudf.IntervalDtype):
+                        data = pa.array(arbitrary, type=dtype.to_arrow())
                         return as_column(data, nan_as_null=nan_as_null)
                     if isinstance(dtype, cudf.core.dtypes.Decimal64Dtype):
                         data = pa.array(
@@ -2065,14 +2072,11 @@ def as_column(
                             data
                         )
                     dtype = pd.api.types.pandas_dtype(dtype)
-                    if is_categorical_dtype(dtype) or is_interval_dtype(dtype):
-                        raise TypeError
+                    np_type = np.dtype(dtype).type
+                    if np_type == np.bool_:
+                        pa_type = pa.bool_()
                     else:
-                        np_type = np.dtype(dtype).type
-                        if np_type == np.bool_:
-                            pa_type = pa.bool_()
-                        else:
-                            pa_type = np_to_pa_dtype(np.dtype(dtype))
+                        pa_type = np_to_pa_dtype(np.dtype(dtype))
                 data = as_column(
                     pa.array(
                         arbitrary,
@@ -2299,7 +2303,62 @@ def full(size: int, fill_value: ScalarLike, dtype: Dtype = None) -> ColumnBase:
     return ColumnBase.from_scalar(cudf.Scalar(fill_value, dtype), size)
 
 
-def _concat_columns(objs: "MutableSequence[ColumnBase]") -> ColumnBase:
+def _copy_type_metadata_from_arrow(
+    arrow_array: pa.array, cudf_column: ColumnBase
+) -> ColumnBase:
+    """
+    Similar to `Column._copy_type_metadata`, except copies type metadata
+    from arrow array into a cudf column. Recursive for every level.
+    * When `arrow_array` is struct type and `cudf_column` is StructDtype, copy
+    field names.
+    * When `arrow_array` is decimal type and `cudf_column` is
+    Decimal64Dtype, copy precisions.
+    """
+    if pa.types.is_decimal(arrow_array.type) and isinstance(
+        cudf_column,
+        (cudf.core.column.Decimal32Column, cudf.core.column.Decimal64Column),
+    ):
+        cudf_column.dtype.precision = arrow_array.type.precision
+    elif pa.types.is_struct(arrow_array.type) and isinstance(
+        cudf_column, cudf.core.column.StructColumn
+    ):
+        base_children = tuple(
+            _copy_type_metadata_from_arrow(arrow_array.field(i), col_child)
+            for i, col_child in enumerate(cudf_column.base_children)
+        )
+        cudf_column.set_base_children(base_children)
+        return cudf.core.column.StructColumn(
+            data=None,
+            size=cudf_column.base_size,
+            dtype=StructDtype.from_arrow(arrow_array.type),
+            mask=cudf_column.base_mask,
+            offset=cudf_column.offset,
+            null_count=cudf_column.null_count,
+            children=base_children,
+        )
+    elif pa.types.is_list(arrow_array.type) and isinstance(
+        cudf_column, cudf.core.column.ListColumn
+    ):
+        if arrow_array.values and cudf_column.base_children:
+            base_children = (
+                cudf_column.base_children[0],
+                _copy_type_metadata_from_arrow(
+                    arrow_array.values, cudf_column.base_children[1]
+                ),
+            )
+            return cudf.core.column.ListColumn(
+                size=cudf_column.base_size,
+                dtype=ListDtype.from_arrow(arrow_array.type),
+                mask=cudf_column.base_mask,
+                offset=cudf_column.offset,
+                null_count=cudf_column.null_count,
+                children=base_children,
+            )
+
+    return cudf_column
+
+
+def concat_columns(objs: "MutableSequence[ColumnBase]") -> ColumnBase:
     """Concatenate a sequence of columns."""
     if len(objs) == 0:
         dtype = pandas_dtype(None)
