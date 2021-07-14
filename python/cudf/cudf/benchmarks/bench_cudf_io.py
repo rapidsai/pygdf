@@ -4,19 +4,23 @@ import pytest
 import cudf
 import glob
 import io
+import os
+
 from conftest import option
+from get_datasets import create_dataset
+
+datatype = ["float32", "float64", "int32", "int64", "str", "datetime64[s]"]
+
+null_frequency = [0.1, 0.4, 0.8]
 
 
-def get_dataset_dir():
-    if option.dataset_dir == "NONE":
-        return "cudf/benchmarks/cuio_data/datasets/"
-    return option.dataset_dir
-
-
-@pytest.mark.parametrize("skiprows", [None, 100000, 200000])
-@pytest.mark.parametrize("file_path", glob.glob(get_dataset_dir() + "avro_*"))
-def bench_avro(benchmark, file_path, use_buffer, skiprows):
-
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("skiprows", [0, 1000, 20000])
+def bench_avro(benchmark, dataset_dir, use_buffer, skiprows):
+    file_path = glob.glob(dataset_dir + "avro_*")
     if use_buffer == "True":
         with open(file_path, "rb") as f:
             file_path = io.BytesIO(f.read())
@@ -52,9 +56,14 @@ def get_dtypes(file_path):
         raise TypeError("Unsupported dtype file")
 
 
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("skiprows", [0, 1000, 20000])
 @pytest.mark.parametrize("dtype", ["infer", "provide"])
-@pytest.mark.parametrize("file_path", glob.glob(get_dataset_dir() + "json_*"))
-def bench_json(benchmark, file_path, use_buffer, dtype):
+def bench_json(benchmark, dataset_dir, use_buffer, dtype, skiprows):
+    file_path = glob.glob(dataset_dir + "json_*")
     if "bz2" in file_path:
         compression = "bz2"
     elif "gzip" in file_path:
@@ -79,6 +88,113 @@ def bench_json(benchmark, file_path, use_buffer, dtype):
         engine="cudf",
         compression=compression,
         lines=True,
+        skiprows=skiprows,
         orient="records",
         dtype=dtype,
     )
+
+
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("null_frequency", null_frequency)
+@pytest.mark.parametrize("dtype", datatype)
+def bench_to_csv(benchmark, dtype, null_frequency, run_bench, dataset_dir):
+    table, file_path = create_dataset(
+        dtype, file_type="csv", only_file=False, null_frequency=null_frequency
+    )
+
+    cudf_df = cudf.DataFrame.from_arrow(table)
+    benchmark(cudf_df.to_csv, file_path)
+
+
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("dtype", datatype)
+def bench_from_csv(benchmark, dataset_dir, use_buffer, dtype):
+    file_path = create_dataset(
+        dtype, file_type="csv", only_file=True, null_frequency=None
+    )
+
+    if use_buffer == "True":
+        with open(file_path, "rb") as f:
+            file = io.BytesIO(f.read())
+    else:
+        file = file_path
+    benchmark(cudf.read_csv, file)
+    os.remove(file_path)
+
+
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("dtype", datatype)
+@pytest.mark.parametrize("null_frequency", null_frequency)
+def bench_to_orc(benchmark, dtype, null_frequency):
+    table, file_path = create_dataset(
+        dtype, file_type="orc", only_file=False, null_frequency=null_frequency
+    )
+
+    cudf_df = cudf.DataFrame.from_arrow(table)
+    benchmark(cudf_df.to_orc, file_path)
+
+
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("dtype", datatype)
+def bench_read_orc(benchmark, use_buffer, bench_pandas, run_bench, dtype):
+    file_path = create_dataset(
+        dtype, file_type="orc", only_file=True, null_frequency=None
+    )
+
+    if use_buffer == "True":
+        with open(file_path, "rb") as f:
+            file = io.BytesIO(f.read())
+    else:
+        file = file_path
+    benchmark(cudf.read_orc, file)
+    if not bench_pandas:
+        os.remove(file_path)
+
+
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("dtype", datatype)
+@pytest.mark.parametrize("null_frequency", null_frequency)
+def bench_to_parquet(benchmark, dtype, null_frequency):
+    table, file_path = create_dataset(
+        dtype,
+        file_type="parquet",
+        only_file=False,
+        null_frequency=null_frequency,
+    )
+
+    cudf_df = cudf.DataFrame.from_arrow(table)
+    benchmark(cudf_df.to_parquet, file_path)
+
+
+@pytest.mark.skipif(
+    option.run_bench is False,
+    reason="Pass `run_bench` as True to run benchmarks",
+)
+@pytest.mark.parametrize("dtype", datatype)
+def bench_read_parquet(benchmark, use_buffer, dtype):
+    file_path = create_dataset(
+        dtype, file_type="parquet", only_file=True, null_frequency=None
+    )
+
+    if use_buffer == "True":
+        with open(file_path, "rb") as f:
+            file = io.BytesIO(f.read())
+    else:
+        file = file_path
+    benchmark(cudf.read_parquet, file)
+    os.remove(file_path)
