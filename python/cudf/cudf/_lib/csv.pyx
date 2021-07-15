@@ -39,6 +39,7 @@ from cudf._lib.cpp.io.types cimport (
     table_metadata,
     table_with_metadata
 )
+from cudf._lib.utils cimport data_from_unique_ptr
 from cudf._lib.io.utils cimport make_source_info, make_sink_info
 from cudf._lib.table cimport Table, make_table_view
 from cudf._lib.cpp.table.table_view cimport table_view
@@ -395,7 +396,7 @@ def read_csv(
         c_result = move(cpp_read_csv(read_csv_options_c))
 
     meta_names = [name.decode() for name in c_result.metadata.column_names]
-    df = cudf.DataFrame._from_table(Table.from_unique_ptr(
+    df = cudf.DataFrame._from_data(*data_from_unique_ptr(
         move(c_result.tbl),
         column_names=meta_names
     ))

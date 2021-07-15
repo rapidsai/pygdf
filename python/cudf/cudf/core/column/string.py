@@ -726,11 +726,12 @@ class StringMethods(ColumnMethodsMixin):
         if flags != 0:
             raise NotImplementedError("`flags` parameter is not yet supported")
 
-        out = cpp_extract(self._column, pat)
-        if out._num_columns == 1 and expand is False:
-            return self._return_or_inplace(out._columns[0], expand=expand)
+        data, index = cpp_extract(self._column, pat)
+        if len(data) == 1 and expand is False:
+            data = next(iter(data.values()))
         else:
-            return self._return_or_inplace(out, expand=expand)
+            data = cudf.core.frame.Frame(data, index)
+        return self._return_or_inplace(data, expand=expand)
 
     def contains(
         self,
@@ -2387,12 +2388,13 @@ class StringMethods(ColumnMethodsMixin):
             if self._column.null_count == len(self._column):
                 result_table = cudf.core.frame.Frame({0: self._column.copy()})
             else:
-                result_table = cpp_split(
+                data, index = cpp_split(
                     self._column, cudf.Scalar(pat, "str"), n
                 )
-                if len(result_table._data) == 1:
-                    if result_table._data[0].null_count == len(self._column):
-                        result_table = cudf.core.frame.Frame({})
+                if len(data) == 1 and data[0].null_count == len(self._column):
+                    result_table = cudf.core.frame.Frame({})
+                else:
+                    result_table = cudf.core.frame.Frame(data, index)
         else:
             result_table = cpp_split_record(
                 self._column, cudf.Scalar(pat, "str"), n
@@ -2542,10 +2544,13 @@ class StringMethods(ColumnMethodsMixin):
             if self._column.null_count == len(self._column):
                 result_table = cudf.core.frame.Frame({0: self._column.copy()})
             else:
-                result_table = cpp_rsplit(self._column, cudf.Scalar(pat), n)
-                if len(result_table._data) == 1:
-                    if result_table._data[0].null_count == len(self._column):
-                        result_table = cudf.core.frame.Frame({})
+                data, index = cpp_rsplit(
+                    self._column, cudf.Scalar(pat, "str"), n
+                )
+                if len(data) == 1 and data[0].null_count == len(self._column):
+                    result_table = cudf.core.frame.Frame({})
+                else:
+                    result_table = cudf.core.frame.Frame(data, index)
         else:
             result_table = cpp_rsplit_record(self._column, cudf.Scalar(pat), n)
 
@@ -2628,7 +2633,10 @@ class StringMethods(ColumnMethodsMixin):
             sep = " "
 
         return self._return_or_inplace(
-            cpp_partition(self._column, cudf.Scalar(sep)), expand=expand
+            cudf.core.frame.Frame(
+                *cpp_partition(self._column, cudf.Scalar(sep))
+            ),
+            expand=expand,
         )
 
     def rpartition(self, sep: str = " ", expand: bool = True) -> ParentType:
@@ -2692,7 +2700,10 @@ class StringMethods(ColumnMethodsMixin):
             sep = " "
 
         return self._return_or_inplace(
-            cpp_rpartition(self._column, cudf.Scalar(sep)), expand=expand
+            cudf.core.frame.Frame(
+                *cpp_rpartition(self._column, cudf.Scalar(sep))
+            ),
+            expand=expand,
         )
 
     def pad(
@@ -3416,8 +3427,9 @@ class StringMethods(ColumnMethodsMixin):
         if flags != 0:
             raise NotImplementedError("`flags` parameter is not yet supported")
 
+        data, index = cpp_findall(self._column, pat)
         return self._return_or_inplace(
-            cpp_findall(self._column, pat), expand=expand
+            cudf.core.frame.Frame(data, index), expand=expand
         )
 
     def isempty(self) -> ParentType:

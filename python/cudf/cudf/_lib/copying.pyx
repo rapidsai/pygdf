@@ -34,7 +34,12 @@ from cudf._lib.cpp.lists.lists_column_view cimport lists_column_view
 from cudf._lib.cpp.lists.gather cimport (
     segmented_gather as cpp_segmented_gather
 )
+from cudf._lib.utils cimport (
+    data_from_table_view,
+    data_from_unique_ptr
+)
 cimport cudf._lib.cpp.copying as cpp_copying
+
 
 # workaround for https://github.com/cython/cython/issues/3885
 ctypedef const scalar constscalar
@@ -178,7 +183,7 @@ def gather(
             )
         )
 
-    return Table.from_unique_ptr(
+    return data_from_unique_ptr(
         move(c_result),
         column_names=source_table._column_names,
         index_names=(
@@ -210,18 +215,16 @@ def _scatter_table(Table source_table, Column scatter_map,
             )
         )
 
-    out_table = Table.from_unique_ptr(
+    data, _ = data_from_unique_ptr(
         move(c_result),
         column_names=target_table._column_names,
         index_names=None
     )
 
-    out_table._index = (
+    return data, (
         None if target_table._index is None else target_table._index.copy(
             deep=False)
     )
-
-    return out_table
 
 
 def _scatter_scalar(scalars, Column scatter_map,
@@ -250,18 +253,16 @@ def _scatter_scalar(scalars, Column scatter_map,
             )
         )
 
-    out_table = Table.from_unique_ptr(
+    data, _ = data_from_unique_ptr(
         move(c_result),
         column_names=target_table._column_names,
         index_names=None
     )
 
-    out_table._index = (
+    return data, (
         None if target_table._index is None else target_table._index.copy(
             deep=False)
     )
-
-    return out_table
 
 
 def scatter(object input, object scatter_map, Table target,
@@ -306,7 +307,7 @@ def _reverse_table(Table source_table):
             reverse_table_view
         ))
 
-    return Table.from_unique_ptr(
+    return data_from_unique_ptr(
         move(c_result),
         column_names=source_table._column_names,
         index_names=source_table._index_names
@@ -371,7 +372,7 @@ def table_empty_like(Table input_table, bool keep_index=True):
     with nogil:
         c_result = move(cpp_copying.empty_like(input_table_view))
 
-    return Table.from_unique_ptr(
+    return data_from_unique_ptr(
         move(c_result),
         column_names=input_table._column_names,
         index_names=(
@@ -434,8 +435,8 @@ def table_slice(Table input_table, object indices, bool keep_index=True):
         )
 
     num_of_result_cols = c_result.size()
-    result =[
-        Table.from_table_view(
+    return [
+        data_from_table_view(
             c_result[i],
             input_table,
             column_names=input_table._column_names,
@@ -445,8 +446,6 @@ def table_slice(Table input_table, object indices, bool keep_index=True):
                 else None
             )
         ) for i in range(num_of_result_cols)]
-
-    return result
 
 
 def column_split(Column input_column, object splits):
@@ -505,8 +504,8 @@ def table_split(Table input_table, object splits, bool keep_index=True):
         )
 
     num_of_result_cols = c_result.size()
-    result = [
-        Table.from_table_view(
+    return [
+        data_from_table_view(
             c_result[i],
             input_table,
             column_names=input_table._column_names,
@@ -514,8 +513,6 @@ def table_split(Table input_table, object splits, bool keep_index=True):
                 keep_index is True)
             else None
         ) for i in range(num_of_result_cols)]
-
-    return result
 
 
 def _copy_if_else_column_column(Column lhs, Column rhs, Column boolean_mask):
@@ -642,7 +639,7 @@ def _boolean_mask_scatter_table(Table input_table, Table target_table,
             )
         )
 
-    return Table.from_unique_ptr(
+    return data_from_unique_ptr(
         move(c_result),
         column_names=target_table._column_names,
         index_names=target_table._index._column_names
@@ -672,13 +669,15 @@ def _boolean_mask_scatter_scalar(list input_scalars, Table target_table,
             )
         )
 
-    return Table.from_unique_ptr(
+    return data_from_unique_ptr(
         move(c_result),
         column_names=target_table._column_names,
         index_names=target_table._index._column_names
     )
 
 
+# TODO: Should we remove this API (and the two functions above)? I don't see it
+# exposed anywhere in cudf.
 def boolean_mask_scatter(object input, Table target_table,
                          Column boolean_mask):
 
@@ -755,7 +754,7 @@ def sample(Table input, size_type n,
             cpp_copying.sample(tbl_view, n, replacement, seed)
         )
 
-    return Table.from_unique_ptr(
+    return data_from_unique_ptr(
         move(c_output),
         column_names=input._column_names,
         index_names=(
@@ -878,12 +877,12 @@ cdef class _CPackedColumns:
         return p
 
     def unpack(self):
-        output_table = Table.from_table_view(
+        output_table = Table(*data_from_table_view(
             cpp_copying.unpack(self.c_obj),
             self,
             self.column_names,
             self.index_names
-        )
+        ))
 
         for name, dtype in self.column_dtypes.items():
             output_table._data[name] = (
