@@ -480,7 +480,7 @@ void reader::impl::set_data_types(device_span<uint64_t const> rec_starts,
 
     auto split_on_colon = [](std::string_view s) {
       auto const i = s.find(":");
-      return std::pair{s.substr(0, i), s.substr(i + 1)};
+      return std::make_pair(s.substr(0, i), s.substr(i + 1));
     };
 
     if (is_dict) {
